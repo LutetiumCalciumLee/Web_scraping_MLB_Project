@@ -116,6 +116,7 @@ async def scrape_high_lev_recent(
                 minimum_delay_seconds=minimum_delay_seconds,
                 maximum_delay_seconds=maximum_delay_seconds,
                 navigation_timeout_ms=navigation_timeout_ms,
+                allow_empty=True,
             )
             risp_cells = await find_team_pitcher_cells(
                 page,

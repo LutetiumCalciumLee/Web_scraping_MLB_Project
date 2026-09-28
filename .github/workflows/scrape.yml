@@ -1,0 +1,53 @@
+name: Scrape MLB tables sequentially
+
+on:
+  workflow_dispatch:
+    inputs:
+      selected_date:
+        description: "경기 날짜 YYYY-MM-DD (비우면 한국시간 기준 다음 날)"
+        required: false
+        type: string
+  schedule:
+    # UTC 09:17 = Korea 18:17. The script prepares the next Korean-calendar day.
+    - cron: "17 9 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mlb-sequential-scrape
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      SELECTED_DATE: ${{ inputs.selected_date }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Install Playwright Chromium
+        run: python -m playwright install --with-deps chromium
+
+      - name: Scrape and store every table in strict order
+        shell: bash
+        run: |
+          if [[ -n "$SELECTED_DATE" ]]; then
+            python -m scripts.scrape_daily_to_supabase --selected-date "$SELECTED_DATE"
+          else
+            python -m scripts.scrape_daily_to_supabase
+          fi
