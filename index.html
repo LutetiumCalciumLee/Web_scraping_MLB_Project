@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">  
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MLB 경기 예측</title>
+    <link rel="stylesheet" href="MLB_Prediction.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="MLB_Frontend.js"></script>
+</head>
+<body>
+    <div class="container">
+        <h1 class="title">MLB 경기 예측</h1>
+        
+        <div class="date-section">
+            <div class="date-label">날짜 선택</div>
+            <div class="date-navigation">
+                <div class="date-arrow" onclick="changeDate(-1)">◀</div>
+                <div class="date-display" onclick="toggleCalendar()"></div>
+                <div class="date-arrow" onclick="changeDate(1)">▶</div>
+            </div>
+            <div class="calendar-container" id="calendarContainer" style="display: none;">
+                <div class="calendar">
+                    <div class="calendar-header">
+                        <div class="calendar-nav" onclick="changeMonth(-1)">◀</div>
+                        <div class="calendar-month-year" id="calendarMonthYear"></div>
+                        <div class="calendar-nav" onclick="changeMonth(1)">▶</div>
+                    </div>
+                    <div class="calendar-weekdays">
+                        <div class="weekday">일</div>
+                        <div class="weekday">월</div>
+                        <div class="weekday">화</div>
+                        <div class="weekday">수</div>
+                        <div class="weekday">목</div>
+                        <div class="weekday">금</div>
+                        <div class="weekday">토</div>
+                    </div>
+                    <div class="calendar-days" id="calendarDays"></div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="games-section">
+            <h2 class="section-title">선택 날짜의 경기</h2>
+            <!-- games-carousel: 게임 목록을 좌우로 스크롤할 수 있는 캐러셀 컨테이너 -->
+            <!-- 좌우 화살표를 눌러 페이지를 이동하고 게임 박스를 가로로 배치하여 표시 -->
+            <div class="games-carousel">
+                <!-- 왼쪽 화살표: 이전 페이지로 이동 -->
+                <div class="nav-arrow">◀</div>
+                <!-- 게임 목록 컨테이너: 실제 게임 박스들이 동적으로 생성되는 영역 -->
+                <div class="games-container" id="gamesContainer">
+                    <!-- 게임 목록이 동적으로 생성됩니다 -->
+                </div>
+                <!-- 오른쪽 화살표: 다음 페이지로 이동 -->
+                <div class="nav-arrow">▶</div>
+            </div>
+            <!-- 페이지네이션: 현재 페이지 표시 및 페이지 이동 -->
+            <div class="pagination">
+                <div class="pagination-dot active"></div>
+                <div class="pagination-dot"></div>
+                <div class="pagination-dot"></div>
+            </div>
+        </div>
+        
+        <div class="starter-stats-container">
+            <div class="stats-section">
+                <h3 class="stats-title">선발투수 상대 전적</h3>
+            <table class="stats-table" id="starterH2H">
+                <thead>
+                    <tr>
+                        <th>Team</th>
+                        <th>Name</th>
+                        <th class="chart-hoverable" data-stat="G">G</th>
+                        <th class="chart-hoverable" data-stat="IP">IP</th>
+                        <th class="chart-hoverable" data-stat="ERA">ERA</th>
+                        <th class="chart-hoverable" data-stat="BB/9">BB/9</th>
+                        <th class="chart-hoverable" data-stat="AVG">AVG</th>
+                        <th class="chart-hoverable" data-stat="OBP">OBP</th>
+                        <th class="chart-hoverable" data-stat="SLG">SLG</th>
+                        <th class="chart-hoverable" data-stat="OPS">OPS</th>
+                        <th class="chart-hoverable" data-stat="RISP">RISP</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+            </div>
+        </div>
+
+        <div class="starter-stats-container">
+            <div class="stats-section">
+                <h3 class="stats-title">선발투수 최근 성적</h3>
+            <table class="stats-table" id="starterRecent">
+                <thead>
+                    <tr>
+                        <th>Team</th>
+                        <th>Name</th>
+                        <th class="chart-hoverable" data-stat="G">G</th>
+                        <th class="chart-hoverable" data-stat="IP">IP</th>
+                        <th class="chart-hoverable" data-stat="ERA">ERA</th>
+                        <th class="chart-hoverable" data-stat="BB/9">BB/9</th>
+                        <th class="chart-hoverable" data-stat="AVG">AVG</th>
+                        <th class="chart-hoverable" data-stat="OBP">OBP</th>
+                        <th class="chart-hoverable" data-stat="SLG">SLG</th>
+                        <th class="chart-hoverable" data-stat="OPS">OPS</th>
+                        <th class="chart-hoverable" data-stat="RISP">RISP</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+            </div>
+        </div>
+
+        <div class="stats-section">
+                <h3 class="stats-title">High Leverage 상대 전적</h3>
+            <table class="stats-table" id="highLevH2H">
+                <thead>
+                    <tr>
+                        <th>Team</th>
+                        <th>Name</th>
+                        <th>G</th>
+                        <th>IP</th>
+                        <th>ERA</th>
+                        <th>BB/9</th>
+                        <th>AVG</th>
+                        <th>OBP</th>
+                        <th>SLG</th>
+                        <th>OPS</th>
+                        <th>RISP</th>
+                    </tr>
+                </thead>
+                <tbody>
+                </tbody>
+            </table>
+            </div>
+            
+            <div class="stats-section">
+                <h3 class="stats-title">High Leverage 최근 성적</h3>
+            <table class="stats-table" id="highLevRecent">
+                <thead>
+                    <tr>
+                        <th>Team</th>
+                        <th>Name</th>
+                        <th>G</th>
+                        <th>IP</th>
+                        <th>ERA</th>
+                        <th>BB/9</th>
+                        <th>AVG</th>
+                        <th>OBP</th>
+                        <th>SLG</th>
+                        <th>OPS</th>
+                        <th>RISP</th>
+                    </tr>
+                </thead>
+                <tbody>
+                </tbody>
+            </table>
+            </div>
+
+        <div class="stats-section">
+                <h3 class="stats-title">Medium Leverage 상대 전적</h3>
+            <table class="stats-table" id="midLevH2H">
+                <thead>
+                    <tr>
+                        <th>Team</th>
+                        <th>Name</th>
+                        <th>G</th>
+                        <th>IP</th>
+                        <th>ERA</th>
+                        <th>BB/9</th>
+                        <th>AVG</th>
+                        <th>OBP</th>
+                        <th>SLG</th>
+                        <th>OPS</th>
+                        <th>RISP</th>
+                    </tr>
+                </thead>
+                <tbody>
+                </tbody>
+            </table>
+            </div>
+            
+            <div class="stats-section">
+                <h3 class="stats-title">Medium Leverage 최근 성적</h3>
+            <table class="stats-table" id="midLevRecent">
+                <thead>
+                    <tr>
+                        <th>Team</th>
+                        <th>Name</th>
+                        <th>G</th>
+                        <th>IP</th>
+                        <th>ERA</th>
+                        <th>BB/9</th>
+                        <th>AVG</th>
+                        <th>OBP</th>
+                        <th>SLG</th>
+                        <th>OPS</th>
+                        <th>RISP</th>
+                    </tr>
+                </thead>
+                <tbody>
+                </tbody>
+            </table>
+            </div>
+
+        <div class="stats-section">
+                <h3 class="stats-title">Low Leverage 상대 전적</h3>
+            <table class="stats-table" id="lowLevH2H">
+                <thead>
+                    <tr>
+                        <th>Team</th>
+                        <th>Name</th>
+                        <th>G</th>
+                        <th>IP</th>
+                        <th>ERA</th>
+                        <th>BB/9</th>
+                        <th>AVG</th>
+                        <th>OBP</th>
+                        <th>SLG</th>
+                        <th>OPS</th>
+                        <th>RISP</th>
+                    </tr>
+                </thead>
+                <tbody>
+                </tbody>
+            </table>
+            </div>
+            
+            <div class="stats-section">
+                <h3 class="stats-title">Low Leverage 최근 성적</h3>
+            <table class="stats-table" id="lowLevRecent">
+                <thead>
+                    <tr>
+                        <th>Team</th>
+                        <th>Name</th>
+                        <th>G</th>
+                        <th>IP</th>
+                        <th>ERA</th>
+                        <th>BB/9</th>
+                        <th>AVG</th>
+                        <th>OBP</th>
+                        <th>SLG</th>
+                        <th>OPS</th>
+                        <th>RISP</th>
+                    </tr>
+                </thead>
+                <tbody>
+                </tbody>
+            </table>
+            </div>
+
+        <div class="stats-section">
+                <h3 class="stats-title">출전 불가 투수 (3연투)</h3>
+            <table class="stats-table" id="unplayablePitchers">
+                <thead>
+                    <tr>
+                        <th>Team</th>
+                        <th>Name</th>
+                        <th>IP</th>
+                    </tr>
+                </thead>
+                <tbody>
+                </tbody>
+            </table>
+            </div>
+            
+            <div class="stats-section">
+                <h3 class="stats-title">최근 타격 성적</h3>
+                <table class="stats-table" id="hittingRecent">
+                <thead>
+                    <tr>
+                        <th>Team</th>
+                        <th class="chart-hoverable" data-stat="AVG">AVG</th>
+                        <th class="chart-hoverable" data-stat="OBP">OBP</th>
+                        <th class="chart-hoverable" data-stat="SLG">SLG</th>
+                        <th class="chart-hoverable" data-stat="OPS">OPS</th>
+                        <th class="chart-hoverable" data-stat="RISP">RISP</th>
+                    </tr>
+                </thead>
+                <tbody>
+                </tbody>
+            </table>
+            </div>
+
+    </div>
+
+</body>
+</html>
+
+
