@@ -12,6 +12,19 @@ const MLB_TABLE_IDS = Object.freeze({
     hittingRecent: 'hittingRecent'
 });
 
+const MLB_SNAPSHOT_TABLE_ORDER = Object.freeze([
+    'starterH2H',
+    'starterRecent',
+    'highLevH2H',
+    'highLevRecent',
+    'midLevH2H',
+    'midLevRecent',
+    'lowLevH2H',
+    'lowLevRecent',
+    'unplayablePitchers',
+    'hittingRecent'
+]);
+
 function formatMLBScheduleDate(date) {
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -80,6 +93,7 @@ class MLBFrontend {
         this.selectedGame = null;
         this.currentGames = [];
         this.gamesLoadSequence = 0;
+        this.snapshotLoadSequence = 0;
         this.currentPage = 0; // 현재 페이지 인덱스 (0부터 시작: 0=첫번째 페이지, 1=두번째 페이지, 2=세번째 페이지)
         this.gamesPerPage = 5; // 한 페이지당 표시할 게임 수
         this.totalGames = 0; // 전체 게임 수 (현재 날짜의 총 경기 개수)
@@ -643,6 +657,9 @@ class MLBFrontend {
             // 세 개의 선발투수 표에 원정팀/홈팀과 선발투수를 같은 순서로 표시
             this.updateStartingPitcherTable();
             this.setStarterStatsVisibility(true);
+
+            // GitHub Actions가 순서대로 완성해 둔 Supabase 스냅샷을 읽는다.
+            void this.loadGameSnapshot(selectedGame);
             
             console.log(`Updated teams: ${awayTeamName} vs ${homeTeamName}`);
         }
@@ -835,286 +852,181 @@ class MLBFrontend {
         return this.formatDateForAPI(date);
     }
     
-    // Python 스크래퍼 실행 및 JSON 데이터 로드
-    async runScraperAndLoadData(selectedDate, awayPitcherName, homePitcherName, awayTeamCode, homeTeamCode) {
-        try {
-            // 백엔드 서버에 스크래핑 요청 (statgroup=1)
-            const response1 = await fetch('http://localhost:5001/scrape-fangraphs', {
-                method: 'POST',
+    getSupabaseConfig() {
+        const config = window.MLB_SUPABASE_CONFIG || {};
+        const url = String(config.url || '').replace(/\/$/, '');
+        const publishableKey = String(config.publishableKey || '');
+        const isPlaceholder = !url
+            || !publishableKey
+            || url.includes('YOUR_PROJECT_REF')
+            || publishableKey.includes('YOUR_SUPABASE_PUBLISHABLE_KEY');
+        return isPlaceholder ? null : { url, publishableKey };
+    }
+
+    setDataStatus(message, isError = false) {
+        const status = document.getElementById('dataStatus');
+        if (!status) return;
+        status.textContent = message;
+        status.classList.toggle('error', isError);
+    }
+
+    async fetchGameTableSnapshots(gamePk) {
+        const config = this.getSupabaseConfig();
+        if (!config) {
+            throw new Error('supabase-config.js에 프로젝트 URL과 publishable key를 설정해야 합니다.');
+        }
+
+        const params = new URLSearchParams({
+            select: 'table_key,table_order,payload,collected_at',
+            game_pk: `eq.${gamePk}`,
+            status: 'eq.complete',
+            order: 'table_order.asc'
+        });
+        const response = await fetch(
+            `${config.url}/rest/v1/mlb_game_table_snapshots?${params.toString()}`,
+            {
+                cache: 'no-store',
                 headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    selectedDate: selectedDate
-                })
-            });
-            
-            // 백엔드 서버에 스크래핑 요청 (statgroup=2)
-            const response2 = await fetch('http://localhost:5001/scrape-fangraphs-2', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    selectedDate: selectedDate
-                })
-            });
-            
-            // 백엔드 서버에 스크래핑 요청 (splitArr=42,59)
-            const response3 = await fetch('http://localhost:5001/scrape-fangraphs-3', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    selectedDate: selectedDate
-                })
-            });
-            
-            // 백엔드 서버에 스크래핑 요청 (High Leverage: splitArr=43,72, statgroup=1)
-            const response4 = await fetch('http://localhost:5001/scrape-fangraphs-4', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    selectedDate: selectedDate
-                })
-            });
-            
-            // 백엔드 서버에 스크래핑 요청 (High Leverage: splitArr=43,72, statgroup=2)
-            const response5 = await fetch('http://localhost:5001/scrape-fangraphs-5', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    selectedDate: selectedDate
-                })
-            });
-            
-            // 백엔드 서버에 스크래핑 요청 (High Leverage RISP: splitArr=43,72,59)
-            const response6 = await fetch('http://localhost:5001/scrape-fangraphs-6', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    selectedDate: selectedDate
-                })
-            });
-            
-            // 백엔드 서버에 스크래핑 요청 (Medium Leverage: splitArr=43,73, statgroup=1)
-            const response7 = await fetch('http://localhost:5001/scrape-fangraphs-7', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    selectedDate: selectedDate
-                })
-            });
-            
-            // 백엔드 서버에 스크래핑 요청 (Medium Leverage: splitArr=43,73, statgroup=2)
-            const response8 = await fetch('http://localhost:5001/scrape-fangraphs-8', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    selectedDate: selectedDate
-                })
-            });
-            
-            // 백엔드 서버에 스크래핑 요청 (Medium Leverage RISP: splitArr=43,59,73)
-            const response9 = await fetch('http://localhost:5001/scrape-fangraphs-9', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    selectedDate: selectedDate
-                })
-            });
-            
-            // 백엔드 서버에 스크래핑 요청 (Low Leverage: splitArr=43,74, statgroup=1)
-            const response10 = await fetch('http://localhost:5001/scrape-fangraphs-10', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    selectedDate: selectedDate
-                })
-            });
-            
-            // 백엔드 서버에 스크래핑 요청 (Low Leverage: splitArr=43,74, statgroup=2)
-            const response11 = await fetch('http://localhost:5001/scrape-fangraphs-11', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    selectedDate: selectedDate
-                })
-            });
-            
-            // 백엔드 서버에 스크래핑 요청 (Low Leverage RISP: splitArr=43,59,74)
-            const response12 = await fetch('http://localhost:5001/scrape-fangraphs-12', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    selectedDate: selectedDate
-                })
-            });
-            
-            // 백엔드 서버에 스크래핑 요청 (출전 불가 투수 IP: splitArr=43, statgroup=2, filter=G|gt|2)
-            const response13 = await fetch('http://localhost:5001/scrape-fangraphs-13', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    selectedDate: selectedDate
-                })
-            });
-            
-            // 백엔드 서버에 스크래핑 요청 (타격 성적: splitArr=, statgroup=2, position=B, filter=PA|gt|20)
-            const response14 = await fetch('http://localhost:5001/scrape-fangraphs-14', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    selectedDate: selectedDate
-                })
-            });
-            
-            // 백엔드 서버에 스크래핑 요청 (타격 성적 RISP: splitArr=59, statgroup=1, position=B, filter=PA|gt|7)
-            const response15 = await fetch('http://localhost:5001/scrape-fangraphs-15', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    selectedDate: selectedDate
-                })
-            });
-            
-            if (!response1.ok) {
-                throw new Error(`HTTP error! status: ${response1.status}`);
+                    Accept: 'application/json',
+                    apikey: config.publishableKey,
+                    Authorization: `Bearer ${config.publishableKey}`
+                }
             }
-            
-            if (!response2.ok) {
-                throw new Error(`HTTP error! status: ${response2.status}`);
-            }
-            
-            if (!response3.ok) {
-                throw new Error(`HTTP error! status: ${response3.status}`);
-            }
-            
-            if (!response4.ok) {
-                throw new Error(`HTTP error! status: ${response4.status}`);
-            }
-            
-            if (!response5.ok) {
-                throw new Error(`HTTP error! status: ${response5.status}`);
-            }
-            
-            if (!response6.ok) {
-                throw new Error(`HTTP error! status: ${response6.status}`);
-            }
-            
-            if (!response7.ok) {
-                throw new Error(`HTTP error! status: ${response7.status}`);
-            }
-            
-            if (!response8.ok) {
-                throw new Error(`HTTP error! status: ${response8.status}`);
-            }
-            
-            if (!response9.ok) {
-                throw new Error(`HTTP error! status: ${response9.status}`);
-            }
-            
-            if (!response10.ok) {
-                throw new Error(`HTTP error! status: ${response10.status}`);
-            }
-            
-            if (!response11.ok) {
-                throw new Error(`HTTP error! status: ${response11.status}`);
-            }
-            
-            if (!response12.ok) {
-                throw new Error(`HTTP error! status: ${response12.status}`);
-            }
-            
-            if (!response13.ok) {
-                throw new Error(`HTTP error! status: ${response13.status}`);
-            }
-            
-            if (!response14.ok) {
-                throw new Error(`HTTP error! status: ${response14.status}`);
-            }
-            
-            if (!response15.ok) {
-                throw new Error(`HTTP error! status: ${response15.status}`);
-            }
-            
-            const jsonData1 = await response1.json();
-            const jsonData2 = await response2.json();
-            const jsonData3 = await response3.json();
-            const jsonData4 = await response4.json();
-            const jsonData5 = await response5.json();
-            const jsonData6 = await response6.json();
-            const jsonData7 = await response7.json();
-            const jsonData8 = await response8.json();
-            const jsonData9 = await response9.json();
-            const jsonData10 = await response10.json();
-            const jsonData11 = await response11.json();
-            const jsonData12 = await response12.json();
-            const jsonData13 = await response13.json();
-            const jsonData14 = await response14.json();
-            const jsonData15 = await response15.json();
-            
-            // 세 데이터를 합치기
-            const mergedData = [...jsonData1, ...jsonData2, ...jsonData3];
-            
-            // JSON 데이터에서 투수 통계 찾기 (statgroup=1 데이터 사용)
-            await this.loadPitcherStatsFromJSON(mergedData, awayPitcherName, 0, awayTeamCode);
-            await this.loadPitcherStatsFromJSON(mergedData, homePitcherName, 1, homeTeamCode);
-            
-            // statgroup=2 데이터에서 IP와 BB/9 값 가져오기
-            await this.loadPitcherStatsFromJSON2(jsonData2, awayPitcherName, 0, awayTeamCode);
-            await this.loadPitcherStatsFromJSON2(jsonData2, homePitcherName, 1, homeTeamCode);
-            
-            // splitArr=42,59 데이터에서 AVG 값 가져오기 (RISP 열에 표시)
-            await this.loadPitcherStatsFromJSON3(jsonData3, awayPitcherName, 0, awayTeamCode);
-            await this.loadPitcherStatsFromJSON3(jsonData3, homePitcherName, 1, homeTeamCode);
-            
-            // High Leverage 데이터 로드 (선택한 팀 기준)
-            await this.loadHighLeverageStats(jsonData4, jsonData5, jsonData6, awayTeamCode, homeTeamCode);
-            
-            // Medium Leverage 데이터 로드 (선택한 팀 기준)
-            await this.loadMediumLeverageStats(jsonData7, jsonData8, jsonData9, awayTeamCode, homeTeamCode);
-            
-            // Low Leverage 데이터 로드 (선택한 팀 기준)
-            await this.loadLowLeverageStats(jsonData10, jsonData11, jsonData12, awayTeamCode, homeTeamCode);
-            
-            // 출전 불가 투수 (3연투) 데이터 로드 (scraper13만 사용)
-            await this.loadUnavailablePitchers(jsonData13, awayTeamCode, homeTeamCode);
-            
-            // 최근 타격 성적 데이터 로드
-            await this.loadBattingStats(jsonData14, jsonData15, awayTeamCode, homeTeamCode);
-            
-        } catch (error) {
-            // 에러 발생 시 조용히 처리
-            console.log('Scraper request completed');
+        );
+        if (!response.ok) {
+            const detail = await response.text();
+            throw new Error(`Supabase 조회 실패 (${response.status}): ${detail}`);
+        }
+        return await response.json();
+    }
+
+    renderStarterSnapshot(tableId, results) {
+        const rows = (Array.isArray(results) ? results : []).map(result => {
+            const stats = result && result.stats ? result.stats : {};
+            return [
+                result && result.team,
+                result && result.pitcher,
+                stats.G,
+                stats.IP,
+                stats.ERA,
+                stats['BB/9'],
+                stats.AVG,
+                stats.OBP,
+                stats.SLG,
+                stats.OPS,
+                stats.RISP
+            ].map(value => value ?? '');
+        });
+        this.updateTableData(tableId, rows);
+    }
+
+    renderUnavailableSnapshot(results) {
+        const table = document.getElementById(MLB_TABLE_IDS.unplayablePitchers);
+        const tbody = table ? table.querySelector('tbody') : null;
+        if (!tbody) return;
+
+        const pitchers = (Array.isArray(results) ? results : []).flatMap(result =>
+            result && Array.isArray(result.pitchers) ? result.pitchers : []
+        );
+        tbody.innerHTML = '';
+        pitchers.forEach(pitcher => {
+            const row = document.createElement('tr');
+            const stats = pitcher && pitcher.stats ? pitcher.stats : {};
+            [pitcher.team, pitcher.pitcher, stats.IP].forEach((value, index) => {
+                const cell = document.createElement('td');
+                if (index === 0) cell.className = 'team-cell';
+                if (index === 1) cell.className = 'name-cell';
+                cell.textContent = value ?? '';
+                row.appendChild(cell);
+            });
+            tbody.appendChild(row);
+        });
+        this.mergeTeamCells(tbody);
+    }
+
+    renderSnapshotTable(tableKey, payload) {
+        const results = payload && Array.isArray(payload.results) ? payload.results : [];
+        switch (tableKey) {
+            case MLB_TABLE_IDS.starterH2H:
+            case MLB_TABLE_IDS.starterRecent:
+                this.renderStarterSnapshot(tableKey, results);
+                break;
+            case MLB_TABLE_IDS.highLevH2H:
+            case MLB_TABLE_IDS.highLevRecent:
+            case MLB_TABLE_IDS.midLevH2H:
+            case MLB_TABLE_IDS.midLevRecent:
+            case MLB_TABLE_IDS.lowLevH2H:
+            case MLB_TABLE_IDS.lowLevRecent:
+                this.renderCollectedLeveragePitchers(tableKey, results);
+                break;
+            case MLB_TABLE_IDS.unplayablePitchers:
+                this.renderUnavailableSnapshot(results);
+                break;
+            case MLB_TABLE_IDS.hittingRecent:
+                this.renderCollectedBattingRecent(results);
+                break;
+            default:
+                console.warn(`알 수 없는 Supabase 테이블 키: ${tableKey}`);
         }
     }
-    
+
+    async loadGameSnapshot(game) {
+        if (!game || !game.gamePk) {
+            this.setDataStatus('경기 식별자가 없어 저장된 통계를 조회할 수 없습니다.', true);
+            return;
+        }
+
+        const loadSequence = ++this.snapshotLoadSequence;
+        this.setDataStatus('Supabase에서 저장된 통계를 불러오는 중입니다...');
+        try {
+            const snapshots = await this.fetchGameTableSnapshots(game.gamePk);
+            if (loadSequence !== this.snapshotLoadSequence) return;
+
+            const byTable = new Map(
+                (Array.isArray(snapshots) ? snapshots : []).map(item => [item.table_key, item])
+            );
+            let completedCount = 0;
+            MLB_SNAPSHOT_TABLE_ORDER.forEach(tableKey => {
+                const snapshot = byTable.get(tableKey);
+                if (!snapshot) return;
+                this.renderSnapshotTable(tableKey, snapshot.payload);
+                completedCount += 1;
+            });
+
+            if (completedCount === MLB_SNAPSHOT_TABLE_ORDER.length) {
+                const latest = snapshots
+                    .map(item => item.collected_at)
+                    .filter(Boolean)
+                    .sort()
+                    .at(-1);
+                const collectedText = latest
+                    ? new Date(latest).toLocaleString('ko-KR')
+                    : '시간 정보 없음';
+                this.setDataStatus(`10개 표 로드 완료 · 수집 시각 ${collectedText}`);
+                setTimeout(() => {
+                    this.initComparisonChart();
+                    this.initBattingComparisonChart();
+                }, 100);
+            } else if (completedCount > 0) {
+                this.setDataStatus(
+                    `순차 수집 진행 중입니다 (${completedCount}/${MLB_SNAPSHOT_TABLE_ORDER.length}개 표 완료).`
+                );
+            } else {
+                this.setDataStatus('이 경기의 수집 결과가 아직 없습니다. GitHub Actions를 실행해 주세요.');
+            }
+        } catch (error) {
+            if (loadSequence !== this.snapshotLoadSequence) return;
+            console.error(error);
+            this.setDataStatus(error.message || '저장된 통계를 불러오지 못했습니다.', true);
+        }
+    }
+
+    // 기존 호출 경로도 브라우저 스크래핑 대신 저장된 Supabase 스냅샷을 읽는다.
+    async runScraperAndLoadData() {
+        const selectedGame = this.currentGames[this.selectedGame];
+        await this.loadGameSnapshot(selectedGame);
+    }
+
     // JSON 파일에서 투수 통계를 찾아서 테이블에 업데이트
     async loadPitcherStatsFromJSON(jsonData, pitcherName, rowIndex, teamCode) {
         const startingPitcherTable = document.getElementById(MLB_TABLE_IDS.starterH2H);

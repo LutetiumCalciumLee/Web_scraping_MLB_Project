@@ -6,6 +6,7 @@
     <title>MLB 경기 예측</title>
     <link rel="stylesheet" href="MLB_Prediction.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="supabase-config.js"></script>
     <script src="MLB_Frontend.js"></script>
 </head>
 <body>
@@ -61,7 +62,11 @@
                 <div class="pagination-dot"></div>
             </div>
         </div>
-        
+
+        <div id="dataStatus" class="data-status" role="status" aria-live="polite">
+            경기를 선택하면 저장된 통계를 불러옵니다.
+        </div>
+
         <div class="starter-stats-container">
             <div class="stats-section">
                 <h3 class="stats-title">선발투수 상대 전적</h3>
