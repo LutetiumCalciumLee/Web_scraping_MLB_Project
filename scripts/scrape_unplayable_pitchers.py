@@ -1,8 +1,8 @@
 """Collect pitchers unavailable after three appearances in the prior two days.
 
 The FanGraphs query uses relief-pitcher split 43 and ``G|gt|2`` from two days
-before the selected game through one day before it.  Ordinary Playwright
-automation is used; Cloudflare or other access controls are never bypassed.
+before the selected game through one day before it. Rows come from FanGraphs'
+public leaderboard JSON endpoint.
 """
 
 from __future__ import annotations
@@ -54,6 +54,7 @@ def build_unplayable_pitchers_url(request: UnplayablePitchersRequest) -> str:
         ("position", "P"),
         ("splitArr", "43"),
         ("autoPt", "false"),
+        ("statgroup", "2"),
         ("startDate", start_date.isoformat()),
         ("endDate", end_date.isoformat()),
         ("filter", "G|gt|2"),
@@ -62,16 +63,16 @@ def build_unplayable_pitchers_url(request: UnplayablePitchersRequest) -> str:
 
 
 def extract_unplayable_pitcher(cells: list[str]) -> dict[str, Any]:
-    """Extract td[3] Name, td[4] Team, and td[6] IP from one row."""
+    """Extract Name, Team, and IP from one legacy Advanced row."""
 
-    if len(cells) < 6:
-        raise ScrapeError(f"3연투 투수 행의 열이 부족합니다: expected>=6 actual={len(cells)}")
+    if len(cells) < 5:
+        raise ScrapeError(f"3연투 투수 행의 열이 부족합니다: expected>=5 actual={len(cells)}")
 
     return {
         "team": canonical_team_code(cells[3]),  # td[4]
         "pitcher": normalize_text(cells[2]),   # td[3]
         "stats": {
-            "IP": normalize_text(cells[5]),    # td[6]
+            "IP": normalize_text(cells[4]),    # Legacy Advanced: IP
         },
     }
 
@@ -87,30 +88,15 @@ async def scrape_unplayable_pitchers(
     if not 1.0 <= minimum_delay_seconds <= maximum_delay_seconds <= 5.0:
         raise ValueError("URL별 랜덤 대기 범위는 1초 이상 5초 이하여야 합니다")
 
-    try:
-        from playwright.async_api import async_playwright
-    except ImportError as exc:
-        raise ScrapeError(
-            "Playwright가 설치되지 않았습니다. `pip install -r requirements.txt` 후 "
-            "`python -m playwright install chromium`을 실행하십시오."
-        ) from exc
-
     source_url = build_unplayable_pitchers_url(request)
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=headless)
-        try:
-            page = await browser.new_page()
-            player_cells = await find_team_pitcher_cells(
-                page,
-                source_url,
-                request.team_code,
-                minimum_delay_seconds=minimum_delay_seconds,
-                maximum_delay_seconds=maximum_delay_seconds,
-                navigation_timeout_ms=navigation_timeout_ms,
-                allow_empty=True,
-            )
-        finally:
-            await browser.close()
+    player_cells = await find_team_pitcher_cells(
+        source_url,
+        request.team_code,
+        minimum_delay_seconds=minimum_delay_seconds,
+        maximum_delay_seconds=maximum_delay_seconds,
+        navigation_timeout_ms=navigation_timeout_ms,
+        allow_empty=True,
+    )
 
     pitchers = [extract_unplayable_pitcher(cells) for cells in player_cells]
     start_date, end_date = unplayable_date_range(request.selected_date)

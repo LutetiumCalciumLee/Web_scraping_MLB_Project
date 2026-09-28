@@ -1,8 +1,8 @@
 """Collect recent team batting leaders for display in the hittingRecent table.
 
 The query covers seven days before the selected game through one day before it
-and filters to PA > 19. Ordinary Playwright automation is used; Cloudflare or
-other access controls are never bypassed.
+and filters to PA > 19. Rows come from FanGraphs' public leaderboard JSON
+endpoint.
 """
 
 from __future__ import annotations
@@ -63,6 +63,7 @@ def build_hitting_recent_url(request: HittingRecentRequest) -> str:
     params: list[tuple[str, str]] = [
         ("position", "B"),
         ("autoPt", "false"),
+        ("statgroup", "2"),
         ("startDate", start_date.isoformat()),
         ("endDate", end_date.isoformat()),
         ("filter", "PA|gt|19"),
@@ -179,40 +180,24 @@ async def scrape_hitting_recent(
     if not 1.0 <= minimum_delay_seconds <= maximum_delay_seconds <= 5.0:
         raise ValueError("URL별 랜덤 대기 범위는 1초 이상 5초 이하여야 합니다")
 
-    try:
-        from playwright.async_api import async_playwright
-    except ImportError as exc:
-        raise ScrapeError(
-            "Playwright가 설치되지 않았습니다. `pip install -r requirements.txt` 후 "
-            "`python -m playwright install chromium`을 실행하십시오."
-        ) from exc
-
     source_url = build_hitting_recent_url(request)
     risp_url = build_hitting_recent_risp_url(request)
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=headless)
-        try:
-            page = await browser.new_page()
-            player_cells = await find_team_pitcher_cells(
-                page,
-                source_url,
-                request.team_code,
-                minimum_delay_seconds=minimum_delay_seconds,
-                maximum_delay_seconds=maximum_delay_seconds,
-                navigation_timeout_ms=navigation_timeout_ms,
-                allow_empty=True,
-            )
-            risp_cells = await find_team_pitcher_cells(
-                page,
-                risp_url,
-                request.team_code,
-                minimum_delay_seconds=minimum_delay_seconds,
-                maximum_delay_seconds=maximum_delay_seconds,
-                navigation_timeout_ms=navigation_timeout_ms,
-                allow_empty=True,
-            )
-        finally:
-            await browser.close()
+    player_cells = await find_team_pitcher_cells(
+        source_url,
+        request.team_code,
+        minimum_delay_seconds=minimum_delay_seconds,
+        maximum_delay_seconds=maximum_delay_seconds,
+        navigation_timeout_ms=navigation_timeout_ms,
+        allow_empty=True,
+    )
+    risp_cells = await find_team_pitcher_cells(
+        risp_url,
+        request.team_code,
+        minimum_delay_seconds=minimum_delay_seconds,
+        maximum_delay_seconds=maximum_delay_seconds,
+        navigation_timeout_ms=navigation_timeout_ms,
+        allow_empty=True,
+    )
 
     players = [extract_hitting_player(cells) for cells in player_cells]
     risp_players = [extract_hitting_risp_player(cells) for cells in risp_cells]

@@ -2,8 +2,8 @@
 
 The selected game date is excluded.  The query covers March 1 through the day
 before the game and combines relief-pitcher split 43, High Leverage split 72,
-and the opposing team's split code.  Ordinary Playwright automation is used;
-Cloudflare or other access controls are never bypassed.
+and the opposing team's split code. Rows come from FanGraphs' public
+leaderboard JSON endpoint.
 """
 
 from __future__ import annotations
@@ -26,8 +26,9 @@ try:
         extract_risp_from_cells,
         load_opponent_code,
         normalize_text,
-        open_fangraphs_table_rows,
+        fetch_fangraphs_table_rows,
         season_start_for,
+        with_statgroup,
     )
 except ModuleNotFoundError:  # Allows: python .\scripts\scrape_high_lev_h2h.py
     from scrape_starter_h2h import (  # type: ignore[no-redef]
@@ -38,8 +39,9 @@ except ModuleNotFoundError:  # Allows: python .\scripts\scrape_high_lev_h2h.py
         extract_risp_from_cells,
         load_opponent_code,
         normalize_text,
-        open_fangraphs_table_rows,
+        fetch_fangraphs_table_rows,
         season_start_for,
+        with_statgroup,
     )
 
 
@@ -90,7 +92,7 @@ def build_high_lev_h2h_risp_url(request: HighLevH2HRequest) -> str:
         ("splitArr", str(request.opponent_split_code)),
         ("splitArr", "59"),
         ("autoPt", "false"),
-        ("statgroup", "2"),
+        ("statgroup", "1"),
         ("startDate", start_date.isoformat()),
         ("endDate", end_date.isoformat()),
     ]
@@ -103,29 +105,56 @@ def team_codes_match(actual: str, expected: str) -> bool:
     return canonical_team_code(actual) == canonical_team_code(expected)
 
 
-def extract_high_lev_pitcher(cells: list[str]) -> dict[str, Any]:
+def extract_high_lev_pitcher(
+    standard_cells: list[str],
+    advanced_cells: list[str],
+) -> dict[str, Any]:
     """Map one rendered row to the team, pitcher, and table statistics."""
 
-    if len(cells) < 21:
-        raise ScrapeError(f"High Leverage 행의 열이 부족합니다: expected>=21 actual={len(cells)}")
+    if len(standard_cells) < 20:
+        raise ScrapeError(
+            "High Leverage 행의 열이 부족합니다: "
+            f"expected>=20 actual={len(standard_cells)}"
+        )
 
     return {
-        "team": canonical_team_code(cells[3]),       # td[4]
-        "pitcher": normalize_text(cells[2]),        # td[3]
-        "stats": extract_base_stats_from_cells(cells),
+        "team": canonical_team_code(standard_cells[3]),
+        "pitcher": normalize_text(standard_cells[2]),
+        "stats": extract_base_stats_from_cells(standard_cells, advanced_cells),
     }
+
+
+def merge_pitching_stat_groups(
+    standard_rows: list[list[str]],
+    advanced_rows: list[list[str]],
+) -> list[dict[str, Any]]:
+    """Merge legacy Standard and Advanced rows by normalized pitcher name."""
+
+    advanced_by_pitcher = {
+        normalize_text(cells[2]).casefold(): cells
+        for cells in advanced_rows
+        if len(cells) >= 3
+    }
+    pitchers: list[dict[str, Any]] = []
+    for standard_cells in standard_rows:
+        name = normalize_text(standard_cells[2])
+        advanced_cells = advanced_by_pitcher.get(name.casefold())
+        if advanced_cells is None:
+            raise ScrapeError(f"고급 통계 행에서 투수를 찾지 못했습니다: {name}")
+        pitchers.append(extract_high_lev_pitcher(standard_cells, advanced_cells))
+    return pitchers
 
 
 def merge_risp_stats(
     pitchers: list[dict[str, Any]],
     risp_rows: list[list[str]],
 ) -> list[dict[str, Any]]:
-    """Merge the RISP page's td[19] into base rows by normalized pitcher name."""
+    """Merge the legacy Standard page's AVG into base rows by pitcher name."""
 
     risp_by_pitcher = {
         normalize_text(cells[2]).casefold(): extract_risp_from_cells(cells)
         for cells in risp_rows
-        if len(cells) >= 19
+        if len(cells) >= 18
     }
     for pitcher in pitchers:
         name_key = normalize_text(str(pitcher["pitcher"])).casefold()
@@ -134,7 +163,6 @@ def merge_risp_stats(
 
 
 async def find_team_pitcher_cells(
-    page: Any,
     url: str,
     team_code: str,
     *,
@@ -143,10 +171,9 @@ async def find_team_pitcher_cells(
     navigation_timeout_ms: int,
     allow_empty: bool = False,
 ) -> list[list[str]]:
-    """Return every rendered row whose fourth cell matches the requested team."""
+    """Return every API row whose fourth cell matches the requested team."""
 
-    rows = await open_fangraphs_table_rows(
-        page,
+    rows = await fetch_fangraphs_table_rows(
         url,
         minimum_delay_seconds=minimum_delay_seconds,
         maximum_delay_seconds=maximum_delay_seconds,
@@ -154,14 +181,13 @@ async def find_team_pitcher_cells(
     )
 
     matches: list[list[str]] = []
-    for row_index in range(await rows.count()):
-        cells = await rows.nth(row_index).locator("td").all_text_contents()
+    for cells in rows:
         if len(cells) >= 4 and team_codes_match(cells[3], team_code):
             matches.append(cells)
 
     if not matches and not allow_empty:
         raise TeamPitchersNotFoundError(
-            f"렌더링된 표에서 {canonical_team_code(team_code)} 소속 투수를 찾지 못했습니다."
+            f"FanGraphs 응답에서 {canonical_team_code(team_code)} 소속 투수를 찾지 못했습니다."
         )
     return matches
 
@@ -177,42 +203,35 @@ async def scrape_high_lev_h2h(
     if not 1.0 <= minimum_delay_seconds <= maximum_delay_seconds <= 5.0:
         raise ValueError("URL별 랜덤 대기 범위는 1초 이상 5초 이하여야 합니다")
 
-    try:
-        from playwright.async_api import async_playwright
-    except ImportError as exc:
-        raise ScrapeError(
-            "Playwright가 설치되지 않았습니다. `pip install -r requirements.txt` 후 "
-            "`python -m playwright install chromium`을 실행하십시오."
-        ) from exc
-
     source_url = build_high_lev_h2h_url(request)
+    advanced_url = with_statgroup(source_url, 2)
     risp_url = build_high_lev_h2h_risp_url(request)
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=headless)
-        try:
-            page = await browser.new_page()
-            player_cells = await find_team_pitcher_cells(
-                page,
-                source_url,
-                request.team_code,
-                minimum_delay_seconds=minimum_delay_seconds,
-                maximum_delay_seconds=maximum_delay_seconds,
-                navigation_timeout_ms=navigation_timeout_ms,
-                allow_empty=True,
-            )
-            risp_cells = await find_team_pitcher_cells(
-                page,
-                risp_url,
-                request.team_code,
-                minimum_delay_seconds=minimum_delay_seconds,
-                maximum_delay_seconds=maximum_delay_seconds,
-                navigation_timeout_ms=navigation_timeout_ms,
-                allow_empty=True,
-            )
-        finally:
-            await browser.close()
+    player_cells = await find_team_pitcher_cells(
+        source_url,
+        request.team_code,
+        minimum_delay_seconds=minimum_delay_seconds,
+        maximum_delay_seconds=maximum_delay_seconds,
+        navigation_timeout_ms=navigation_timeout_ms,
+        allow_empty=True,
+    )
+    advanced_cells = await find_team_pitcher_cells(
+        advanced_url,
+        request.team_code,
+        minimum_delay_seconds=minimum_delay_seconds,
+        maximum_delay_seconds=maximum_delay_seconds,
+        navigation_timeout_ms=navigation_timeout_ms,
+        allow_empty=True,
+    )
+    risp_cells = await find_team_pitcher_cells(
+        risp_url,
+        request.team_code,
+        minimum_delay_seconds=minimum_delay_seconds,
+        maximum_delay_seconds=maximum_delay_seconds,
+        navigation_timeout_ms=navigation_timeout_ms,
+        allow_empty=True,
+    )
 
-    pitchers = [extract_high_lev_pitcher(cells) for cells in player_cells]
+    pitchers = merge_pitching_stat_groups(player_cells, advanced_cells)
     merge_risp_stats(pitchers, risp_cells)
     return {
         "selectedDate": request.selected_date.isoformat(),
@@ -225,6 +244,7 @@ async def scrape_high_lev_h2h(
         "pitchers": pitchers,
         "sourceUrls": {
             "base": source_url,
+            "advanced": advanced_url,
             "risp": risp_url,
         },
     }

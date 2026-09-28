@@ -1,9 +1,9 @@
 """Collect one starting pitcher's opponent split from FanGraphs.
 
-This module intentionally uses ordinary Playwright browser automation only.  It
-does not attempt to bypass Cloudflare, CAPTCHAs, login requirements, or paid
-access.  If a Cloudflare verification page is encountered, the run fails before
-returning or storing incomplete data.
+The legacy leaderboard UI loads its rows from FanGraphs' public JSON endpoint.
+This module calls that same endpoint directly so scheduled jobs do not depend on
+headless browser rendering.  It does not attempt to bypass Cloudflare, CAPTCHAs,
+login requirements, or paid access.
 """
 
 from __future__ import annotations
@@ -20,13 +20,16 @@ from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.request import Request, urlopen
 
 
-FANGRAPHS_SPLITS_URL = "https://www.fangraphs.com/leaders/splits-leaderboards"
-TABLE_ROWS_XPATH = (
-    "/html/body/div/div/div/div[4]/div[4]/div/div[2]/div/div[1]/"
-    "table/tbody/tr"
+FANGRAPHS_SPLITS_URL = (
+    "https://www.fangraphs.com/leaders/splits-leaderboards-legacy"
+)
+FANGRAPHS_SPLITS_API_URL = (
+    "https://www.fangraphs.com/api/leaders/splits/splits-leaders"
 )
 DEFAULT_OPPONENT_CODES_PATH = (
     Path(__file__).resolve().parents[1] / "config" / "fangraphs_opponent_codes.json"
@@ -50,7 +53,7 @@ class ScrapeError(RuntimeError):
 
 
 class CloudflareChallengeError(ScrapeError):
-    """Raised when the normal browser session cannot pass Cloudflare."""
+    """Kept for backward compatibility with callers importing this exception."""
 
 
 class PitcherNotFoundError(ScrapeError):
@@ -108,7 +111,7 @@ def build_starter_h2h_urls(request: StarterH2HRequest) -> tuple[str, str]:
     risp_params = common_params + [
         ("splitArr", "59"),
         ("autoPt", "false"),
-        ("statgroup", "2"),
+        ("statgroup", "1"),
         ("startDate", start_date.isoformat()),
         ("endDate", end_date.isoformat()),
     ]
@@ -125,28 +128,51 @@ def calculate_ops(obp: str, slg: str) -> str:
         raise ScrapeError(f"OBP/SLG 값을 숫자로 변환할 수 없습니다: {obp!r}, {slg!r}") from exc
 
     formatted = f"{value:.3f}"
-    if formatted.startswith("0.") and (
-        normalize_text(obp).startswith(".") or normalize_text(slg).startswith(".")
-    ):
+    if formatted.startswith("0."):
         return formatted[1:]
     return formatted
 
 
-def extract_base_stats_from_cells(cells: list[str]) -> dict[str, str]:
-    """Map the user's one-based FanGraphs column positions to display fields."""
+def with_statgroup(url: str, statgroup: int) -> str:
+    """Return the same FanGraphs query for another legacy statistics group."""
 
-    if len(cells) < 21:
-        raise ScrapeError(f"기본 통계 행의 열이 부족합니다: expected>=21 actual={len(cells)}")
+    parsed = urlsplit(url)
+    pairs = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key != "statgroup"
+    ]
+    pairs.append(("statgroup", str(statgroup)))
+    return urlunsplit(parsed._replace(query=urlencode(pairs)))
 
-    cleaned = [normalize_text(cell) for cell in cells]
-    obp = cleaned[19]  # td[20]
-    slg = cleaned[20]  # td[21]
+
+def extract_base_stats_from_cells(
+    standard_cells: list[str],
+    advanced_cells: list[str],
+) -> dict[str, str]:
+    """Merge the legacy Standard and Advanced pitching rows."""
+
+    if len(standard_cells) < 20:
+        raise ScrapeError(
+            "기본 통계 행의 열이 부족합니다: "
+            f"expected>=20 actual={len(standard_cells)}"
+        )
+    if len(advanced_cells) < 14:
+        raise ScrapeError(
+            "고급 통계 행의 열이 부족합니다: "
+            f"expected>=14 actual={len(advanced_cells)}"
+        )
+
+    standard = [normalize_text(cell) for cell in standard_cells]
+    advanced = [normalize_text(cell) for cell in advanced_cells]
+    obp = format_rate(standard[18])
+    slg = format_rate(standard[19])
     return {
-        "G": cleaned[4],       # td[5]
-        "IP": cleaned[5],      # td[6]
-        "ERA": cleaned[6],     # td[7]
-        "BB/9": cleaned[8],    # td[9]
-        "AVG": cleaned[18],    # td[19]
+        "G": standard[4],      # Standard: G
+        "IP": advanced[4],     # Advanced: IP
+        "ERA": format_decimal(standard[6], 2),    # Standard: ERA
+        "BB/9": format_decimal(advanced[7], 2),   # Advanced: BB/9
+        "AVG": format_rate(standard[17]),         # Standard: AVG
         "OBP": obp,
         "SLG": slg,
         "OPS": calculate_ops(obp, slg),
@@ -154,60 +180,138 @@ def extract_base_stats_from_cells(cells: list[str]) -> dict[str, str]:
 
 
 def extract_risp_from_cells(cells: list[str]) -> str:
-    if len(cells) < 19:
-        raise ScrapeError(f"RISP 행의 열이 부족합니다: expected>=19 actual={len(cells)}")
-    return normalize_text(cells[18])  # td[19]
+    if len(cells) < 18:
+        raise ScrapeError(f"RISP 행의 열이 부족합니다: expected>=18 actual={len(cells)}")
+    return format_rate(cells[17])  # Legacy Standard: AVG
 
 
-async def looks_like_cloudflare_challenge(page: Any) -> bool:
-    title = normalize_text(await page.title())
-    body = normalize_text(await page.locator("body").inner_text(timeout=5_000))
-    challenge_markers = (
-        "just a moment",
-        "잠시만 기다리십시오",
-        "보안 확인 수행 중",
-        "verify you are human",
-        "checking your browser",
-        "cf-chl-",
+def format_decimal(value: str, places: int) -> str:
+    """Format one API decimal to the precision shown by the legacy table."""
+
+    try:
+        return f"{Decimal(normalize_text(value)):.{places}f}"
+    except InvalidOperation as exc:
+        raise ScrapeError(f"FanGraphs 값을 숫자로 변환할 수 없습니다: {value!r}") from exc
+
+
+def format_rate(value: str) -> str:
+    """Format a baseball rate with three decimals and no leading zero."""
+
+    formatted = format_decimal(value, 3)
+    return formatted[1:] if formatted.startswith("0.") else formatted
+
+
+def _parse_filter(value: str) -> dict[str, Any]:
+    """Convert a legacy ``STAT|comparison|value`` query into the API shape."""
+
+    parts = value.split("|")
+    if len(parts) != 3 or not all(parts):
+        raise ScrapeError(f"지원하지 않는 FanGraphs 필터 형식입니다: {value!r}")
+    stat, comparison, low = parts
+    labels = {"gt": "≥", "lt": "≤", "eq": "="}
+    return {
+        "stat": stat,
+        "comp": comparison,
+        "low": low,
+        "high": -99,
+        "label": f"{stat} {labels.get(comparison, comparison)} {low}",
+        "value": 0,
+    }
+
+
+def build_fangraphs_api_payload(url: str) -> dict[str, Any]:
+    """Translate a legacy leaderboard URL into its public JSON request body."""
+
+    query: dict[str, list[str]] = {}
+    for key, value in parse_qsl(urlsplit(url).query, keep_blank_values=True):
+        query.setdefault(key, []).append(value)
+
+    def first(key: str, default: str = "") -> str:
+        values = query.get(key)
+        return values[0] if values else default
+
+    def integers(key: str) -> list[int]:
+        return [int(value) for value in query.get(key, []) if value]
+
+    return {
+        "strPlayerId": "all",
+        "strSplitArr": integers("splitArr"),
+        "strGroup": first("groupBy", "season"),
+        "strPosition": first("position", "P"),
+        "strType": first("statgroup", "1"),
+        "strStartDate": first("startDate"),
+        "strEndDate": first("endDate"),
+        "strSplitTeams": first("splitTeams", "false").casefold() == "true",
+        "dctFilters": [_parse_filter(value) for value in query.get("filter", []) if value],
+        "strStatType": first("statType", "player"),
+        "strAutoPt": first("autoPt", "true"),
+        "arrPlayerId": integers("players"),
+        "strSplitArrPitch": integers("splitArrPitch"),
+        "arrWxTemperature": None,
+        "arrWxPressure": None,
+        "arrWxAirDensity": None,
+        "arrWxElevation": None,
+        "arrWxWindSpeed": None,
+    }
+
+
+def _request_fangraphs_rows(url: str, timeout_seconds: float) -> list[list[str]]:
+    payload = build_fangraphs_api_payload(url)
+    request = Request(
+        FANGRAPHS_SPLITS_API_URL,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "MLB-Scraping-Project/1.0",
+        },
+        method="POST",
     )
-    haystack = f"{title}\n{body}".casefold()
-    return any(marker.casefold() in haystack for marker in challenge_markers)
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise ScrapeError(
+            f"FanGraphs API HTTP {exc.code} 요청 실패: {detail[:500]}"
+        ) from exc
+    except (URLError, TimeoutError) as exc:
+        raise ScrapeError(f"FanGraphs API 네트워크 요청 실패: {exc}") from exc
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ScrapeError("FanGraphs API가 유효한 JSON을 반환하지 않았습니다.") from exc
+
+    headers = body.get("k") if isinstance(body, dict) else None
+    values = body.get("v") if isinstance(body, dict) else None
+    if not isinstance(headers, list) or not isinstance(values, list):
+        raise ScrapeError(f"FanGraphs API 응답 형식이 올바르지 않습니다: {body!r}")
+
+    rows: list[list[str]] = []
+    for value_row in values:
+        if not isinstance(value_row, list) or len(value_row) != len(headers):
+            raise ScrapeError("FanGraphs API 행의 열 개수가 헤더와 일치하지 않습니다.")
+        rows.append([""] + ["" if value is None else str(value) for value in value_row])
+    return rows
 
 
-async def open_fangraphs_table_rows(
-    page: Any,
+async def fetch_fangraphs_table_rows(
     url: str,
     *,
     minimum_delay_seconds: float,
     maximum_delay_seconds: float,
     navigation_timeout_ms: int,
-) -> Any:
-    """Open one URL, wait 1–5 seconds, and return its rendered table rows."""
+) -> list[list[str]]:
+    """Wait 1–5 seconds, then return rows from the public leaderboard API."""
 
-    await page.goto(url, wait_until="domcontentloaded", timeout=navigation_timeout_ms)
-
-    # The delay is deliberately applied once per URL, after navigation and before
-    # reading the table.  It is not intended to defeat access controls.
     delay_seconds = random.uniform(minimum_delay_seconds, maximum_delay_seconds)
-    await page.wait_for_timeout(delay_seconds * 1_000)
-
-    if await looks_like_cloudflare_challenge(page):
-        raise CloudflareChallengeError(
-            "FanGraphs Cloudflare 보안 확인이 감지되었습니다. "
-            "인증 우회 없이 정상 세션에서 접근할 수 있을 때 다시 실행하십시오."
-        )
-
-    rows = page.locator(f"xpath={TABLE_ROWS_XPATH}")
-    try:
-        await rows.first.wait_for(state="visible", timeout=navigation_timeout_ms)
-    except Exception as exc:
-        raise ScrapeError("FanGraphs 통계 테이블을 찾지 못했습니다.") from exc
-
-    return rows
+    await asyncio.sleep(delay_seconds)
+    return await asyncio.to_thread(
+        _request_fangraphs_rows,
+        url,
+        navigation_timeout_ms / 1_000,
+    )
 
 
 async def find_pitcher_cells(
-    page: Any,
     url: str,
     pitcher_name: str,
     *,
@@ -215,27 +319,24 @@ async def find_pitcher_cells(
     maximum_delay_seconds: float,
     navigation_timeout_ms: int,
 ) -> list[str]:
-    """Open one URL and return the requested pitcher's rendered row."""
+    """Fetch one URL and return the requested pitcher's API row."""
 
-    rows = await open_fangraphs_table_rows(
-        page,
+    rows = await fetch_fangraphs_table_rows(
         url,
         minimum_delay_seconds=minimum_delay_seconds,
         maximum_delay_seconds=maximum_delay_seconds,
         navigation_timeout_ms=navigation_timeout_ms,
     )
 
-    for row_index in range(await rows.count()):
-        row = rows.nth(row_index)
-        name_link = row.locator("td:nth-child(3) a")
-        if await name_link.count() == 0:
+    for cells in rows:
+        if len(cells) < 3:
             continue
-        actual_name = await name_link.first.inner_text()
+        actual_name = cells[2]
         if names_match(actual_name, pitcher_name):
-            return await row.locator("td").all_text_contents()
+            return cells
 
     raise PitcherNotFoundError(
-        f"렌더링된 표에서 투수를 찾지 못했습니다: {pitcher_name}"
+        f"FanGraphs 응답에서 투수를 찾지 못했습니다: {pitcher_name}"
     )
 
 
@@ -250,39 +351,30 @@ async def scrape_starter_h2h(
     if not 1.0 <= minimum_delay_seconds <= maximum_delay_seconds <= 5.0:
         raise ValueError("URL별 랜덤 대기 범위는 1초 이상 5초 이하여야 합니다")
 
-    try:
-        from playwright.async_api import async_playwright
-    except ImportError as exc:
-        raise ScrapeError(
-            "Playwright가 설치되지 않았습니다. `pip install -r requirements.txt` 후 "
-            "`python -m playwright install chromium`을 실행하십시오."
-        ) from exc
-
     base_url, risp_url = build_starter_h2h_urls(request)
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=headless)
-        try:
-            page = await browser.new_page()
-            base_cells = await find_pitcher_cells(
-                page,
-                base_url,
-                request.pitcher_name,
-                minimum_delay_seconds=minimum_delay_seconds,
-                maximum_delay_seconds=maximum_delay_seconds,
-                navigation_timeout_ms=navigation_timeout_ms,
-            )
-            risp_cells = await find_pitcher_cells(
-                page,
-                risp_url,
-                request.pitcher_name,
-                minimum_delay_seconds=minimum_delay_seconds,
-                maximum_delay_seconds=maximum_delay_seconds,
-                navigation_timeout_ms=navigation_timeout_ms,
-            )
-        finally:
-            await browser.close()
+    base_cells = await find_pitcher_cells(
+        base_url,
+        request.pitcher_name,
+        minimum_delay_seconds=minimum_delay_seconds,
+        maximum_delay_seconds=maximum_delay_seconds,
+        navigation_timeout_ms=navigation_timeout_ms,
+    )
+    advanced_cells = await find_pitcher_cells(
+        with_statgroup(base_url, 2),
+        request.pitcher_name,
+        minimum_delay_seconds=minimum_delay_seconds,
+        maximum_delay_seconds=maximum_delay_seconds,
+        navigation_timeout_ms=navigation_timeout_ms,
+    )
+    risp_cells = await find_pitcher_cells(
+        risp_url,
+        request.pitcher_name,
+        minimum_delay_seconds=minimum_delay_seconds,
+        maximum_delay_seconds=maximum_delay_seconds,
+        navigation_timeout_ms=navigation_timeout_ms,
+    )
 
-    stats = extract_base_stats_from_cells(base_cells)
+    stats = extract_base_stats_from_cells(base_cells, advanced_cells)
     stats["RISP"] = extract_risp_from_cells(risp_cells)
     return {
         "selectedDate": request.selected_date.isoformat(),
@@ -293,6 +385,7 @@ async def scrape_starter_h2h(
         "stats": stats,
         "sourceUrls": {
             "base": base_url,
+            "advanced": with_statgroup(base_url, 2),
             "risp": risp_url,
         },
     }

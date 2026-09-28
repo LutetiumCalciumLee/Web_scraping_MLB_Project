@@ -13,8 +13,8 @@ from urllib.parse import urlencode
 
 try:
     from scripts.scrape_high_lev_h2h import (
-        extract_high_lev_pitcher,
         find_team_pitcher_cells,
+        merge_pitching_stat_groups,
         merge_risp_stats,
     )
     from scripts.scrape_leverage_h2h import LeverageLevel, leverage_split_code
@@ -22,11 +22,12 @@ try:
         FANGRAPHS_SPLITS_URL,
         ScrapeError,
         canonical_team_code,
+        with_statgroup,
     )
 except ModuleNotFoundError:  # Allows direct execution from the scripts directory.
     from scrape_high_lev_h2h import (  # type: ignore[no-redef]
-        extract_high_lev_pitcher,
         find_team_pitcher_cells,
+        merge_pitching_stat_groups,
         merge_risp_stats,
     )
     from scrape_leverage_h2h import (  # type: ignore[no-redef]
@@ -37,6 +38,7 @@ except ModuleNotFoundError:  # Allows direct execution from the scripts director
         FANGRAPHS_SPLITS_URL,
         ScrapeError,
         canonical_team_code,
+        with_statgroup,
     )
 
 
@@ -78,7 +80,7 @@ def build_leverage_recent_risp_url(request: LeverageRecentRequest) -> str:
         ("splitArr", str(leverage_split_code(request.leverage_level))),
         ("splitArr", "59"),
         ("autoPt", "false"),
-        ("statgroup", "2"),
+        ("statgroup", "1"),
         ("startDate", start_date.isoformat()),
         ("endDate", end_date.isoformat()),
     ]
@@ -96,42 +98,35 @@ async def scrape_leverage_recent(
     if not 1.0 <= minimum_delay_seconds <= maximum_delay_seconds <= 5.0:
         raise ValueError("URL별 랜덤 대기 범위는 1초 이상 5초 이하여야 합니다")
 
-    try:
-        from playwright.async_api import async_playwright
-    except ImportError as exc:
-        raise ScrapeError(
-            "Playwright가 설치되지 않았습니다. `pip install -r requirements.txt` 후 "
-            "`python -m playwright install chromium`을 실행하십시오."
-        ) from exc
-
     source_url = build_leverage_recent_url(request)
+    advanced_url = with_statgroup(source_url, 2)
     risp_url = build_leverage_recent_risp_url(request)
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=headless)
-        try:
-            page = await browser.new_page()
-            player_cells = await find_team_pitcher_cells(
-                page,
-                source_url,
-                request.team_code,
-                minimum_delay_seconds=minimum_delay_seconds,
-                maximum_delay_seconds=maximum_delay_seconds,
-                navigation_timeout_ms=navigation_timeout_ms,
-                allow_empty=True,
-            )
-            risp_cells = await find_team_pitcher_cells(
-                page,
-                risp_url,
-                request.team_code,
-                minimum_delay_seconds=minimum_delay_seconds,
-                maximum_delay_seconds=maximum_delay_seconds,
-                navigation_timeout_ms=navigation_timeout_ms,
-                allow_empty=True,
-            )
-        finally:
-            await browser.close()
+    player_cells = await find_team_pitcher_cells(
+        source_url,
+        request.team_code,
+        minimum_delay_seconds=minimum_delay_seconds,
+        maximum_delay_seconds=maximum_delay_seconds,
+        navigation_timeout_ms=navigation_timeout_ms,
+        allow_empty=True,
+    )
+    advanced_cells = await find_team_pitcher_cells(
+        advanced_url,
+        request.team_code,
+        minimum_delay_seconds=minimum_delay_seconds,
+        maximum_delay_seconds=maximum_delay_seconds,
+        navigation_timeout_ms=navigation_timeout_ms,
+        allow_empty=True,
+    )
+    risp_cells = await find_team_pitcher_cells(
+        risp_url,
+        request.team_code,
+        minimum_delay_seconds=minimum_delay_seconds,
+        maximum_delay_seconds=maximum_delay_seconds,
+        navigation_timeout_ms=navigation_timeout_ms,
+        allow_empty=True,
+    )
 
-    pitchers = [extract_high_lev_pitcher(cells) for cells in player_cells]
+    pitchers = merge_pitching_stat_groups(player_cells, advanced_cells)
     merge_risp_stats(pitchers, risp_cells)
     start_date, end_date = leverage_recent_date_range(request.selected_date)
     return {
@@ -145,6 +140,7 @@ async def scrape_leverage_recent(
         "pitchers": pitchers,
         "sourceUrls": {
             "base": source_url,
+            "advanced": advanced_url,
             "risp": risp_url,
         },
     }

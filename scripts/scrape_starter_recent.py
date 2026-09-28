@@ -1,8 +1,8 @@
 """Collect one starting pitcher's statistics over the previous 30 days.
 
 The selected game date is excluded: the range starts 30 days before the game
-and ends one day before it.  This module uses ordinary Playwright browser
-automation and does not attempt to bypass Cloudflare or other access controls.
+and ends one day before it. The data comes from FanGraphs' public leaderboard
+JSON endpoint.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ try:
         extract_base_stats_from_cells,
         extract_risp_from_cells,
         find_pitcher_cells,
+        with_statgroup,
     )
 except ModuleNotFoundError:  # Allows: python .\scripts\scrape_starter_recent.py
     from scrape_starter_h2h import (  # type: ignore[no-redef]
@@ -33,6 +34,7 @@ except ModuleNotFoundError:  # Allows: python .\scripts\scrape_starter_recent.py
         extract_base_stats_from_cells,
         extract_risp_from_cells,
         find_pitcher_cells,
+        with_statgroup,
     )
 
 
@@ -67,7 +69,7 @@ def build_starter_recent_urls(request: StarterRecentRequest) -> tuple[str, str]:
         ("splitArr", "42"),
         ("splitArr", "59"),
         ("autoPt", "false"),
-        ("statgroup", "2"),
+        ("statgroup", "1"),
         ("startDate", start_date.isoformat()),
         ("endDate", end_date.isoformat()),
     ]
@@ -88,39 +90,30 @@ async def scrape_starter_recent(
     if not 1.0 <= minimum_delay_seconds <= maximum_delay_seconds <= 5.0:
         raise ValueError("URL별 랜덤 대기 범위는 1초 이상 5초 이하여야 합니다")
 
-    try:
-        from playwright.async_api import async_playwright
-    except ImportError as exc:
-        raise ScrapeError(
-            "Playwright가 설치되지 않았습니다. `pip install -r requirements.txt` 후 "
-            "`python -m playwright install chromium`을 실행하십시오."
-        ) from exc
-
     base_url, risp_url = build_starter_recent_urls(request)
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=headless)
-        try:
-            page = await browser.new_page()
-            base_cells = await find_pitcher_cells(
-                page,
-                base_url,
-                request.pitcher_name,
-                minimum_delay_seconds=minimum_delay_seconds,
-                maximum_delay_seconds=maximum_delay_seconds,
-                navigation_timeout_ms=navigation_timeout_ms,
-            )
-            risp_cells = await find_pitcher_cells(
-                page,
-                risp_url,
-                request.pitcher_name,
-                minimum_delay_seconds=minimum_delay_seconds,
-                maximum_delay_seconds=maximum_delay_seconds,
-                navigation_timeout_ms=navigation_timeout_ms,
-            )
-        finally:
-            await browser.close()
+    base_cells = await find_pitcher_cells(
+        base_url,
+        request.pitcher_name,
+        minimum_delay_seconds=minimum_delay_seconds,
+        maximum_delay_seconds=maximum_delay_seconds,
+        navigation_timeout_ms=navigation_timeout_ms,
+    )
+    advanced_cells = await find_pitcher_cells(
+        with_statgroup(base_url, 2),
+        request.pitcher_name,
+        minimum_delay_seconds=minimum_delay_seconds,
+        maximum_delay_seconds=maximum_delay_seconds,
+        navigation_timeout_ms=navigation_timeout_ms,
+    )
+    risp_cells = await find_pitcher_cells(
+        risp_url,
+        request.pitcher_name,
+        minimum_delay_seconds=minimum_delay_seconds,
+        maximum_delay_seconds=maximum_delay_seconds,
+        navigation_timeout_ms=navigation_timeout_ms,
+    )
 
-    stats = extract_base_stats_from_cells(base_cells)
+    stats = extract_base_stats_from_cells(base_cells, advanced_cells)
     stats["RISP"] = extract_risp_from_cells(risp_cells)
     start_date, end_date = recent_date_range(request.selected_date)
     return {
@@ -132,6 +125,7 @@ async def scrape_starter_recent(
         "stats": stats,
         "sourceUrls": {
             "base": base_url,
+            "advanced": with_statgroup(base_url, 2),
             "risp": risp_url,
         },
     }
