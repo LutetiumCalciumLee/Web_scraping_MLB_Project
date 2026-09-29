@@ -7,6 +7,11 @@ on:
         description: "경기 날짜 YYYY-MM-DD (비우면 한국시간 기준 다음 날)"
         required: false
         type: string
+      process_queue:
+        description: "웹에서 등록된 가장 오래된 날짜 요청 1건 처리"
+        required: false
+        type: boolean
+        default: false
   schedule:
     # Browser date clicks enqueue a request in Supabase. Poll the queue without
     # exposing a GitHub token to the public GitHub Pages site.
@@ -29,6 +34,7 @@ jobs:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
       SELECTED_DATE: ${{ inputs.selected_date }}
+      PROCESS_QUEUE: ${{ inputs.process_queue }}
       SCHEDULE_EXPRESSION: ${{ github.event.schedule }}
 
     steps:
@@ -47,7 +53,7 @@ jobs:
       - name: Scrape and store every table in strict order
         shell: bash
         run: |
-          if [[ "$GITHUB_EVENT_NAME" == "schedule" && "$SCHEDULE_EXPRESSION" == "*/5 * * * *" ]]; then
+          if [[ "$PROCESS_QUEUE" == "true" || ( "$GITHUB_EVENT_NAME" == "schedule" && "$SCHEDULE_EXPRESSION" == "*/5 * * * *" ) ]]; then
             python -m scripts.process_scrape_queue
           elif [[ -n "$SELECTED_DATE" ]]; then
             python -m scripts.scrape_daily_to_supabase --selected-date "$SELECTED_DATE"
