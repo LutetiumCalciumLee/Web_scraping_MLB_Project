@@ -105,6 +105,7 @@ set search_path = public
 as $$
 declare
     queued public.mlb_scrape_requests%rowtype;
+    should_dispatch boolean := false;
 begin
     if p_selected_date is null then
         raise exception 'selected date is required' using errcode = '22023';
@@ -134,52 +135,41 @@ begin
         null,
         null
     )
-    on conflict (selected_date) do update
-    set
-        status = case
-            when mlb_scrape_requests.status in ('pending', 'running')
-                then mlb_scrape_requests.status
-            when mlb_scrape_requests.requested_at > now() - interval '30 minutes'
-                then mlb_scrape_requests.status
-            else 'pending'
-        end,
-        requested_at = case
-            when mlb_scrape_requests.status in ('pending', 'running')
-                then mlb_scrape_requests.requested_at
-            when mlb_scrape_requests.requested_at > now() - interval '30 minutes'
-                then mlb_scrape_requests.requested_at
-            else now()
-        end,
-        started_at = case
-            when mlb_scrape_requests.status in ('pending', 'running')
-                or mlb_scrape_requests.requested_at > now() - interval '30 minutes'
-                then mlb_scrape_requests.started_at
-            else null
-        end,
-        finished_at = case
-            when mlb_scrape_requests.status in ('pending', 'running')
-                or mlb_scrape_requests.requested_at > now() - interval '30 minutes'
-                then mlb_scrape_requests.finished_at
-            else null
-        end,
-        error_message = case
-            when mlb_scrape_requests.status in ('pending', 'running')
-                or mlb_scrape_requests.requested_at > now() - interval '30 minutes'
-                then mlb_scrape_requests.error_message
-            else null
-        end,
-        run_id = case
-            when mlb_scrape_requests.status in ('pending', 'running')
-                or mlb_scrape_requests.requested_at > now() - interval '30 minutes'
-                then mlb_scrape_requests.run_id
-            else null
-        end
+    on conflict (selected_date) do nothing
     returning * into queued;
+
+    if found then
+        should_dispatch := true;
+    else
+        -- Serialize requests for the same date so repeated clicks create at
+        -- most one immediate GitHub Actions run.
+        select *
+        into queued
+        from public.mlb_scrape_requests
+        where selected_date = p_selected_date
+        for update;
+
+        if queued.status not in ('pending', 'running')
+            and queued.requested_at <= now() - interval '30 minutes' then
+            update public.mlb_scrape_requests
+            set
+                status = 'pending',
+                requested_at = now(),
+                started_at = null,
+                finished_at = null,
+                error_message = null,
+                run_id = null
+            where id = queued.id
+            returning * into queued;
+            should_dispatch := true;
+        end if;
+    end if;
 
     return jsonb_build_object(
         'selectedDate', queued.selected_date,
         'status', queued.status,
-        'requestedAt', queued.requested_at
+        'requestedAt', queued.requested_at,
+        'shouldDispatch', should_dispatch
     );
 end;
 $$;

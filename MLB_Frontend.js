@@ -893,15 +893,14 @@ class MLBFrontend {
                 throw new Error('supabase-config.js에 프로젝트 URL과 publishable key를 설정해야 합니다.');
             }
             const response = await fetch(
-                `${config.url}/rest/v1/rpc/request_mlb_scrape`,
+                `${config.url}/functions/v1/request-mlb-scrape`,
                 {
                     method: 'POST',
                     cache: 'no-store',
                     headers: {
                         Accept: 'application/json',
                         'Content-Type': 'application/json',
-                        apikey: config.publishableKey,
-                        Authorization: `Bearer ${config.publishableKey}`
+                        apikey: config.publishableKey
                     },
                     body: JSON.stringify({ p_selected_date: dateString })
                 }
@@ -916,10 +915,28 @@ class MLBFrontend {
         this.scrapeRequestPromises.set(dateString, requestPromise);
         try {
             return await requestPromise;
-        } catch (error) {
+        } finally {
             this.scrapeRequestPromises.delete(dateString);
-            throw error;
         }
+    }
+
+    describeScrapeRequest(request) {
+        if (request && request.dispatchStatus === 'started') {
+            return '이 날짜 전체 경기 수집을 즉시 시작했습니다.';
+        }
+        if (request && request.dispatchStatus === 'fallback') {
+            return '수집 요청을 등록했습니다. 즉시 호출이 지연되어 5분 주기로 자동 재확인합니다.';
+        }
+        if (request && request.status === 'running') {
+            return '이 날짜 전체 경기를 이미 수집 중입니다.';
+        }
+        if (request && request.status === 'failed') {
+            return '최근 수집 요청이 실패했습니다. 30분 후 날짜를 다시 선택하면 재시도합니다.';
+        }
+        if (request && request.status === 'complete') {
+            return '이 날짜의 최근 수집 요청은 완료됐습니다.';
+        }
+        return '이 날짜 전체 경기의 수집 요청이 대기 중입니다.';
     }
 
     async fetchAnySnapshotForDate(dateString) {
@@ -962,14 +979,7 @@ class MLBFrontend {
 
             const request = await this.requestScrapeForDate(dateString);
             if (requestSequence !== this.gamesLoadSequence) return;
-            const queueStatus = request && request.status === 'running'
-                ? '이 날짜 전체 경기를 이미 수집 중입니다.'
-                : request && request.status === 'failed'
-                    ? '최근 수집 요청이 실패했습니다. 30분 후 날짜를 다시 선택하면 재시도합니다.'
-                    : request && request.status === 'complete'
-                        ? '이 날짜의 최근 수집 요청은 완료됐습니다.'
-                        : '이 날짜 전체 경기의 자동 수집 요청을 등록했습니다.';
-            this.setDataStatus(queueStatus);
+            this.setDataStatus(this.describeScrapeRequest(request));
         } catch (error) {
             if (requestSequence !== this.gamesLoadSequence) return;
             console.error(error);
@@ -1150,13 +1160,7 @@ class MLBFrontend {
                 const selectedDate = game.date || this.formatDateForAPI(this.currentDate);
                 if (requestIfMissing && this.isScrapeRequestDateAllowed(selectedDate)) {
                     const request = await this.requestScrapeForDate(selectedDate);
-                    const queueStatus = request && request.status === 'running'
-                        ? '이미 수집 중입니다.'
-                        : request && request.status === 'failed'
-                            ? '최근 수집 요청이 실패했습니다. 30분 후 다시 선택하면 재시도합니다.'
-                            : request && request.status === 'complete'
-                                ? '최근 날짜 수집은 완료됐지만 이 경기는 저장되지 않았습니다.'
-                                : '자동 수집 요청을 등록했습니다.';
+                    const queueStatus = this.describeScrapeRequest(request);
                     this.setDataStatus(
                         `${queueStatus} GitHub Actions 상태를 자동으로 확인합니다.`
                     );

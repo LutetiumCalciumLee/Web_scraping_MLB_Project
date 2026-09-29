@@ -1,0 +1,4 @@
+project_id = "fvzqvnlwrmnlrnvhsykm"
+
+[functions.request-mlb-scrape]
+verify_jwt = false
