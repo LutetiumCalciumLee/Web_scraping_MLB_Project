@@ -94,6 +94,8 @@ class MLBFrontend {
         this.currentGames = [];
         this.gamesLoadSequence = 0;
         this.snapshotLoadSequence = 0;
+        this.snapshotPollTimer = null;
+        this.scrapeRequestPromises = new Map();
         this.currentPage = 0; // 현재 페이지 인덱스 (0부터 시작: 0=첫번째 페이지, 1=두번째 페이지, 2=세번째 페이지)
         this.gamesPerPage = 5; // 한 페이지당 표시할 게임 수
         this.totalGames = 0; // 전체 게임 수 (현재 날짜의 총 경기 개수)
@@ -870,6 +872,76 @@ class MLBFrontend {
         status.classList.toggle('error', isError);
     }
 
+    isScrapeRequestDateAllowed(dateString) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateString || ''))) return false;
+        const selected = new Date(`${dateString}T00:00:00`);
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const oldest = new Date(today);
+        oldest.setDate(oldest.getDate() - 400);
+        return selected >= oldest && selected <= today;
+    }
+
+    async requestScrapeForDate(dateString) {
+        if (this.scrapeRequestPromises.has(dateString)) {
+            return await this.scrapeRequestPromises.get(dateString);
+        }
+
+        const requestPromise = (async () => {
+            const config = this.getSupabaseConfig();
+            if (!config) {
+                throw new Error('supabase-config.js에 프로젝트 URL과 publishable key를 설정해야 합니다.');
+            }
+            const response = await fetch(
+                `${config.url}/rest/v1/rpc/request_mlb_scrape`,
+                {
+                    method: 'POST',
+                    cache: 'no-store',
+                    headers: {
+                        Accept: 'application/json',
+                        'Content-Type': 'application/json',
+                        apikey: config.publishableKey,
+                        Authorization: `Bearer ${config.publishableKey}`
+                    },
+                    body: JSON.stringify({ p_selected_date: dateString })
+                }
+            );
+            if (!response.ok) {
+                const detail = await response.text();
+                throw new Error(`수집 요청 등록 실패 (${response.status}): ${detail}`);
+            }
+            return await response.json();
+        })();
+
+        this.scrapeRequestPromises.set(dateString, requestPromise);
+        try {
+            return await requestPromise;
+        } catch (error) {
+            this.scrapeRequestPromises.delete(dateString);
+            throw error;
+        }
+    }
+
+    scheduleSnapshotPoll(game, pollAttempt) {
+        if (this.snapshotPollTimer) clearTimeout(this.snapshotPollTimer);
+        if (pollAttempt >= 180) {
+            this.setDataStatus(
+                '수집 요청은 등록됐지만 아직 완료되지 않았습니다. 잠시 후 다시 선택해 주세요.'
+            );
+            return;
+        }
+
+        const expectedGamePk = String(game.gamePk);
+        this.snapshotPollTimer = setTimeout(() => {
+            const selected = this.currentGames[this.selectedGame];
+            if (!selected || String(selected.gamePk) !== expectedGamePk) return;
+            void this.loadGameSnapshot(game, {
+                requestIfMissing: false,
+                pollAttempt: pollAttempt + 1
+            });
+        }, 30000);
+    }
+
     async fetchGameTableSnapshots(gamePk) {
         const config = this.getSupabaseConfig();
         if (!config) {
@@ -970,7 +1042,10 @@ class MLBFrontend {
         }
     }
 
-    async loadGameSnapshot(game) {
+    async loadGameSnapshot(
+        game,
+        { requestIfMissing = true, pollAttempt = 0 } = {}
+    ) {
         if (!game || !game.gamePk) {
             this.setDataStatus('경기 식별자가 없어 저장된 통계를 조회할 수 없습니다.', true);
             return;
@@ -994,6 +1069,10 @@ class MLBFrontend {
             });
 
             if (completedCount === MLB_SNAPSHOT_TABLE_ORDER.length) {
+                if (this.snapshotPollTimer) {
+                    clearTimeout(this.snapshotPollTimer);
+                    this.snapshotPollTimer = null;
+                }
                 const latest = snapshots
                     .map(item => item.collected_at)
                     .filter(Boolean)
@@ -1011,8 +1090,32 @@ class MLBFrontend {
                 this.setDataStatus(
                     `순차 수집 진행 중입니다 (${completedCount}/${MLB_SNAPSHOT_TABLE_ORDER.length}개 표 완료).`
                 );
+                if (pollAttempt > 0) this.scheduleSnapshotPoll(game, pollAttempt);
             } else {
-                this.setDataStatus('이 경기의 수집 결과가 아직 없습니다. GitHub Actions를 실행해 주세요.');
+                const selectedDate = game.date || this.formatDateForAPI(this.currentDate);
+                if (requestIfMissing && this.isScrapeRequestDateAllowed(selectedDate)) {
+                    const request = await this.requestScrapeForDate(selectedDate);
+                    const queueStatus = request && request.status === 'running'
+                        ? '이미 수집 중입니다.'
+                        : request && request.status === 'failed'
+                            ? '최근 수집 요청이 실패했습니다. 30분 후 다시 선택하면 재시도합니다.'
+                            : request && request.status === 'complete'
+                                ? '최근 날짜 수집은 완료됐지만 이 경기는 저장되지 않았습니다.'
+                                : '자동 수집 요청을 등록했습니다.';
+                    this.setDataStatus(
+                        `${queueStatus} GitHub Actions 상태를 자동으로 확인합니다.`
+                    );
+                    if (!request || ['pending', 'running'].includes(request.status)) {
+                        this.scheduleSnapshotPoll(game, 0);
+                    }
+                } else if (!requestIfMissing && pollAttempt > 0) {
+                    this.setDataStatus(
+                        `GitHub Actions 수집을 기다리는 중입니다 (${pollAttempt}/180).`
+                    );
+                    this.scheduleSnapshotPoll(game, pollAttempt);
+                } else {
+                    this.setDataStatus('이 경기의 수집 결과가 아직 없습니다.');
+                }
             }
         } catch (error) {
             if (loadSequence !== this.snapshotLoadSequence) return;

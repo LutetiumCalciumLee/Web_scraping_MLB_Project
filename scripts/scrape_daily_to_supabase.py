@@ -230,6 +230,57 @@ class SupabaseRestClient:
             prefer="resolution=merge-duplicates,return=minimal",
         )
 
+    def claim_oldest_scrape_request(self) -> dict[str, Any] | None:
+        """Claim the oldest browser-queued date.
+
+        The workflow concurrency group guarantees that only one queue worker is
+        active, so a select followed by a status update is sufficient here.
+        """
+
+        rows = self._rest_request(
+            "mlb_scrape_requests",
+            method="GET",
+            query=urlencode(
+                {
+                    "select": "id,selected_date,attempts",
+                    "status": "eq.pending",
+                    "order": "requested_at.asc",
+                    "limit": "1",
+                }
+            ),
+        )
+        if not rows:
+            return None
+
+        request = rows[0]
+        self._rest_request(
+            "mlb_scrape_requests",
+            method="PATCH",
+            query=urlencode({"id": f"eq.{request['id']}"}),
+            payload={
+                "status": "running",
+                "attempts": int(request.get("attempts", 0)) + 1,
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "finished_at": None,
+                "error_message": None,
+            },
+            prefer="return=minimal",
+        )
+        return request
+
+    def update_scrape_request(
+        self,
+        request_id: int,
+        values: dict[str, Any],
+    ) -> None:
+        self._rest_request(
+            "mlb_scrape_requests",
+            method="PATCH",
+            query=urlencode({"id": f"eq.{request_id}"}),
+            payload=values,
+            prefer="return=minimal",
+        )
+
 
 def _sides(game: ScheduledGame) -> tuple[tuple[str, str], tuple[str, str]]:
     return (
@@ -470,16 +521,28 @@ async def run_daily_pipeline(
     scheduled_games = list(games) if games is not None else fetch_games_for_date(selected_date)
     run_id = str(uuid.uuid4())
     completed_steps: list[str] = []
+    game_errors: list[str] = []
     client.create_run(run_id, selected_date, len(scheduled_games))
     try:
         for game in scheduled_games:
-            await run_game_pipeline(
-                game,
-                client,
-                run_id,
-                completed_steps,
-                steps=steps,
+            try:
+                await run_game_pipeline(
+                    game,
+                    client,
+                    run_id,
+                    completed_steps,
+                    steps=steps,
+                )
+            except Exception as exc:
+                message = f"game_pk={game.game_pk}: {exc}"
+                game_errors.append(message)
+                print(f"::error::{message}", file=sys.stderr)
+
+        if game_errors:
+            raise ScrapeError(
+                "일부 경기를 수집하지 못했습니다: " + " | ".join(game_errors)
             )
+
         client.update_run(
             run_id,
             {

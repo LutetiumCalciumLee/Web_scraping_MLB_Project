@@ -8,6 +8,9 @@ on:
         required: false
         type: string
   schedule:
+    # Browser date clicks enqueue a request in Supabase. Poll the queue without
+    # exposing a GitHub token to the public GitHub Pages site.
+    - cron: "*/5 * * * *"
     # UTC 09:17 = Korea 18:17. The script prepares the next Korean-calendar day.
     - cron: "17 9 * * *"
 
@@ -26,6 +29,7 @@ jobs:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
       SELECTED_DATE: ${{ inputs.selected_date }}
+      SCHEDULE_EXPRESSION: ${{ github.event.schedule }}
 
     steps:
       - name: Check out repository
@@ -43,7 +47,9 @@ jobs:
       - name: Scrape and store every table in strict order
         shell: bash
         run: |
-          if [[ -n "$SELECTED_DATE" ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == "schedule" && "$SCHEDULE_EXPRESSION" == "*/5 * * * *" ]]; then
+            python -m scripts.process_scrape_queue
+          elif [[ -n "$SELECTED_DATE" ]]; then
             python -m scripts.scrape_daily_to_supabase --selected-date "$SELECTED_DATE"
           else
             python -m scripts.scrape_daily_to_supabase
