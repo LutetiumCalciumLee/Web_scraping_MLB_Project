@@ -82,7 +82,7 @@ async def scrape_unplayable_pitchers(
     *,
     headless: bool = True,
     minimum_delay_seconds: float = 1.0,
-    maximum_delay_seconds: float = 5.0,
+    maximum_delay_seconds: float = 3.0,
     navigation_timeout_ms: int = 60_000,
 ) -> dict[str, Any]:
     if not 1.0 <= minimum_delay_seconds <= maximum_delay_seconds <= 5.0:

@@ -300,7 +300,7 @@ async def fetch_fangraphs_table_rows(
     maximum_delay_seconds: float,
     navigation_timeout_ms: int,
 ) -> list[list[str]]:
-    """Wait 1–5 seconds, then return rows from the public leaderboard API."""
+    """Wait 1–3 seconds, then return rows from the public leaderboard API."""
 
     delay_seconds = random.uniform(minimum_delay_seconds, maximum_delay_seconds)
     await asyncio.sleep(delay_seconds)
@@ -345,7 +345,7 @@ async def scrape_starter_h2h(
     *,
     headless: bool = True,
     minimum_delay_seconds: float = 1.0,
-    maximum_delay_seconds: float = 5.0,
+    maximum_delay_seconds: float = 3.0,
     navigation_timeout_ms: int = 60_000,
 ) -> dict[str, Any]:
     if not 1.0 <= minimum_delay_seconds <= maximum_delay_seconds <= 5.0:

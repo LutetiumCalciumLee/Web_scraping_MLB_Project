@@ -82,10 +82,10 @@ async def scrape_starter_recent(
     *,
     headless: bool = True,
     minimum_delay_seconds: float = 1.0,
-    maximum_delay_seconds: float = 5.0,
+    maximum_delay_seconds: float = 3.0,
     navigation_timeout_ms: int = 60_000,
 ) -> dict[str, Any]:
-    """Scrape base and RISP rows after a random 1–5 second wait per URL."""
+    """Scrape base and RISP rows after a random 1–3 second wait per URL."""
 
     if not 1.0 <= minimum_delay_seconds <= maximum_delay_seconds <= 5.0:
         raise ValueError("URL별 랜덤 대기 범위는 1초 이상 5초 이하여야 합니다")
