@@ -506,7 +506,7 @@ class MLBFrontend {
     changeDate(direction) {
         this.currentDate.setDate(this.currentDate.getDate() + direction);
         this.updateDateDisplay();
-        this.loadGamesForCurrentDate();
+        this.loadGamesForCurrentDate({ queueIfMissing: true });
         if (this.calendarVisible) {
             this.calendarDate = new Date(this.currentDate);
             this.renderCalendar();
@@ -532,7 +532,7 @@ class MLBFrontend {
     selectDate(date) {
         this.currentDate = new Date(date);
         this.updateDateDisplay();
-        this.loadGamesForCurrentDate();
+        this.loadGamesForCurrentDate({ queueIfMissing: true });
         this.calendarVisible = false;
         const calendarContainer = document.getElementById('calendarContainer');
         if (calendarContainer) {
@@ -919,6 +919,61 @@ class MLBFrontend {
         } catch (error) {
             this.scrapeRequestPromises.delete(dateString);
             throw error;
+        }
+    }
+
+    async fetchAnySnapshotForDate(dateString) {
+        const config = this.getSupabaseConfig();
+        if (!config) {
+            throw new Error('supabase-config.js에 프로젝트 URL과 publishable key를 설정해야 합니다.');
+        }
+        const params = new URLSearchParams({
+            select: 'id',
+            selected_date: `eq.${dateString}`,
+            limit: '1'
+        });
+        const response = await fetch(
+            `${config.url}/rest/v1/mlb_game_table_snapshots?${params.toString()}`,
+            {
+                cache: 'no-store',
+                headers: {
+                    Accept: 'application/json',
+                    apikey: config.publishableKey,
+                    Authorization: `Bearer ${config.publishableKey}`
+                }
+            }
+        );
+        if (!response.ok) {
+            const detail = await response.text();
+            throw new Error(`Supabase 조회 실패 (${response.status}): ${detail}`);
+        }
+        return await response.json();
+    }
+
+    async queueDateScrapeIfMissing(dateString, requestSequence) {
+        if (!this.isScrapeRequestDateAllowed(dateString)) return;
+        try {
+            const existing = await this.fetchAnySnapshotForDate(dateString);
+            if (requestSequence !== this.gamesLoadSequence) return;
+            if (Array.isArray(existing) && existing.length > 0) {
+                this.setDataStatus('저장된 수집 결과가 있습니다. 경기를 선택해 확인해 주세요.');
+                return;
+            }
+
+            const request = await this.requestScrapeForDate(dateString);
+            if (requestSequence !== this.gamesLoadSequence) return;
+            const queueStatus = request && request.status === 'running'
+                ? '이 날짜 전체 경기를 이미 수집 중입니다.'
+                : request && request.status === 'failed'
+                    ? '최근 수집 요청이 실패했습니다. 30분 후 날짜를 다시 선택하면 재시도합니다.'
+                    : request && request.status === 'complete'
+                        ? '이 날짜의 최근 수집 요청은 완료됐습니다.'
+                        : '이 날짜 전체 경기의 자동 수집 요청을 등록했습니다.';
+            this.setDataStatus(queueStatus);
+        } catch (error) {
+            if (requestSequence !== this.gamesLoadSequence) return;
+            console.error(error);
+            this.setDataStatus(error.message || '자동 수집 요청을 등록하지 못했습니다.', true);
         }
     }
 
@@ -2222,7 +2277,7 @@ class MLBFrontend {
         }
     }
     
-    async loadGamesForCurrentDate() {
+    async loadGamesForCurrentDate({ queueIfMissing = false } = {}) {
         const requestedDate = new Date(this.currentDate);
         const requestSequence = ++this.gamesLoadSequence;
         const dateString = this.formatDateForAPI(requestedDate);
@@ -2232,6 +2287,9 @@ class MLBFrontend {
             const games = await getGamesForDate(requestedDate);
             if (requestSequence !== this.gamesLoadSequence) return;
             this.renderGames(games);
+            if (queueIfMissing && games.length > 0) {
+                await this.queueDateScrapeIfMissing(dateString, requestSequence);
+            }
         } catch (error) {
             if (requestSequence !== this.gamesLoadSequence) return;
             console.error('MLB 일정을 불러오지 못했습니다.', error);
